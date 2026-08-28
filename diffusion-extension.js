@@ -214,11 +214,9 @@
           sample = next;
           this.progress = Math.round((step + 1) * 100 / timesteps.length);
 
-          // 5단계마다, 그리고 마지막 단계에서 중간 결과를 갱신한다.
-          if ((step + 1) % 5 === 0 || step === timesteps.length - 1) {
-            this.lastImage = sample;
-            if (this._canDisplay(util)) this._renderImage(sample, util);
-          }
+          // 매 단계마다 중간 결과를 갱신해서 노이즈 제거 과정을 바로 보여준다.
+          this.lastImage = sample;
+          if (this._canDisplay(util)) this._renderImage(sample, util);
           await delay();
         }
 

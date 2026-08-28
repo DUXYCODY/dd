@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ONNX Diffusion Face Demo</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #111318;
+      color: #f2f4f8;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      box-sizing: border-box;
+    }
+    main {
+      width: min(760px, 100%);
+      display: grid;
+      gap: 18px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 28px;
+      line-height: 1.2;
+    }
+    .panel {
+      display: grid;
+      gap: 12px;
+      padding: 18px;
+      border: 1px solid #2f3440;
+      border-radius: 8px;
+      background: #181b22;
+    }
+    label {
+      display: grid;
+      gap: 6px;
+      font-size: 14px;
+      color: #c9d0dc;
+    }
+    input, select, button {
+      font: inherit;
+      border-radius: 6px;
+      border: 1px solid #3a4050;
+      background: #101218;
+      color: #f2f4f8;
+      padding: 10px 12px;
+    }
+    button {
+      cursor: pointer;
+      background: #7354d8;
+      border-color: #7354d8;
+      font-weight: 700;
+    }
+    button:disabled {
+      cursor: wait;
+      opacity: 0.65;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr auto;
+      gap: 12px;
+      align-items: end;
+    }
+    canvas {
+      width: min(512px, 100%);
+      aspect-ratio: 1;
+      image-rendering: pixelated;
+      border: 1px solid #2f3440;
+      border-radius: 8px;
+      background: #05060a;
+      justify-self: center;
+    }
+    progress {
+      width: 100%;
+      height: 18px;
+    }
+    #status {
+      min-height: 24px;
+      color: #c9d0dc;
+      overflow-wrap: anywhere;
+    }
+    @media (max-width: 640px) {
+      .row {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>ONNX 얼굴 생성 테스트</h1>
+    <section class="panel">
+      <label>
+        ONNX 모델 주소
+        <input id="modelUrl" value="https://duxycody.github.io/dd/face_diffusion.onnx">
+      </label>
+      <div class="row">
+        <label>
+          성별 라벨
+          <select id="gender">
+            <option value="female">female</option>
+            <option value="male">male</option>
+          </select>
+        </label>
+        <label>
+          단계
+          <input id="steps" type="number" min="2" max="100" value="30">
+        </label>
+        <button id="generate">생성</button>
+      </div>
+      <progress id="progress" max="100" value="0"></progress>
+      <div id="status">모델 주소 확인 후 생성 버튼을 누르세요.</div>
+    </section>
+    <canvas id="canvas" width="320" height="320"></canvas>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.min.js"></script>
+  <script>
+    'use strict';
+
+    const SIZE = 32;
+    const VALUES = 3 * SIZE * SIZE;
+    const TRAIN_TIMESTEPS = 1000;
+    const ORT_BASE = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
+    const canvas = document.getElementById('canvas');
+    const context = canvas.getContext('2d');
+    const statusEl = document.getElementById('status');
+    const progressEl = document.getElementById('progress');
+    const generateButton = document.getElementById('generate');
+    let session = null;
+    let loadedUrl = '';
+
+    ort.env.wasm.wasmPaths = ORT_BASE;
+
+    const delay = () => new Promise(resolve => setTimeout(resolve, 0));
+    const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
+    const setStatus = text => { statusEl.textContent = text; };
+
+    function validateModelURL(rawURL) {
+      const url = new URL(String(rawURL));
+      const local = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+      if (url.protocol !== 'https:' && !(local && url.protocol === 'http:')) {
+        throw new Error('인터넷 ONNX 모델은 HTTPS 주소여야 합니다.');
+      }
+      return url.href;
+    }
+
+    function buildAlphaBars() {
+      const result = new Float64Array(TRAIN_TIMESTEPS);
+      let product = 1;
+      for (let t = 0; t < TRAIN_TIMESTEPS; t++) {
+        const beta = 0.0001 + (0.02 - 0.0001) * t / (TRAIN_TIMESTEPS - 1);
+        product *= 1 - beta;
+        result[t] = product;
+      }
+      return result;
+    }
+
+    function buildSamplingTimesteps(requested) {
+      const count = clamp(Math.round(Number(requested) || 30), 2, 100);
+      const result = [];
+      for (let i = 0; i < count; i++) {
+        result.push(Math.round(999 * (count - 1 - i) / (count - 1)));
+      }
+      return result;
+    }
+
+    function gaussianNoise(length) {
+      const values = new Float32Array(length);
+      for (let i = 0; i < length; i += 2) {
+        const u1 = Math.max(Math.random(), Number.EPSILON);
+        const u2 = Math.random();
+        const radius = Math.sqrt(-2 * Math.log(u1));
+        values[i] = radius * Math.cos(2 * Math.PI * u2);
+        if (i + 1 < length) values[i + 1] = radius * Math.sin(2 * Math.PI * u2);
+      }
+      return values;
+    }
+
+    const alphaBars = buildAlphaBars();
+
+    function renderImage(image) {
+      const small = document.createElement('canvas');
+      small.width = SIZE;
+      small.height = SIZE;
+      const smallContext = small.getContext('2d');
+      const pixels = smallContext.createImageData(SIZE, SIZE);
+      const plane = SIZE * SIZE;
+      for (let i = 0; i < plane; i++) {
+        pixels.data[i * 4] = Math.round(clamp((image[i] + 1) * 127.5, 0, 255));
+        pixels.data[i * 4 + 1] = Math.round(clamp((image[plane + i] + 1) * 127.5, 0, 255));
+        pixels.data[i * 4 + 2] = Math.round(clamp((image[plane * 2 + i] + 1) * 127.5, 0, 255));
+        pixels.data[i * 4 + 3] = 255;
+      }
+      smallContext.putImageData(pixels, 0, 0);
+      context.imageSmoothingEnabled = false;
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(small, 0, 0, canvas.width, canvas.height);
+    }
+
+    async function loadModel(modelUrl) {
+      if (session && loadedUrl === modelUrl) return session;
+      setStatus('모델 불러오는 중...');
+      session = await ort.InferenceSession.create(modelUrl, {
+        executionProviders: ['wasm'],
+        graphOptimizationLevel: 'all'
+      });
+      for (const name of ['image', 'timestep', 'label']) {
+        if (!session.inputNames.includes(name)) throw new Error(`모델 입력 ${name}이 없습니다.`);
+      }
+      if (!session.outputNames.includes('predicted_noise')) {
+        throw new Error('모델 출력 predicted_noise가 없습니다.');
+      }
+      loadedUrl = modelUrl;
+      setStatus('모델 준비 완료');
+      return session;
+    }
+
+    async function generate() {
+      generateButton.disabled = true;
+      progressEl.value = 0;
+      try {
+        const modelUrl = validateModelURL(document.getElementById('modelUrl').value);
+        const gender = document.getElementById('gender').value;
+        const label = gender === 'male' ? 1n : 0n;
+        const timesteps = buildSamplingTimesteps(document.getElementById('steps').value);
+        const currentSession = await loadModel(modelUrl);
+        let sample = gaussianNoise(VALUES);
+        renderImage(sample);
+        await delay();
+
+        for (let step = 0; step < timesteps.length; step++) {
+          const t = timesteps[step];
+          const previousT = step + 1 < timesteps.length ? timesteps[step + 1] : -1;
+          setStatus(`${step + 1}/${timesteps.length}단계 노이즈 제거 중...`);
+          const outputs = await currentSession.run({
+            image: new ort.Tensor('float32', sample, [1, 3, SIZE, SIZE]),
+            timestep: new ort.Tensor('int64', BigInt64Array.from([BigInt(t)]), [1]),
+            label: new ort.Tensor('int64', BigInt64Array.from([label]), [1])
+          });
+          const noise = outputs.predicted_noise && outputs.predicted_noise.data;
+          if (!noise || noise.length !== VALUES) throw new Error('모델 출력 크기가 1x3x32x32가 아닙니다.');
+
+          const alphaT = alphaBars[t];
+          const alphaPrevious = previousT >= 0 ? alphaBars[previousT] : 1;
+          const sqrtAlphaT = Math.sqrt(alphaT);
+          const sqrtOneMinusAlphaT = Math.sqrt(1 - alphaT);
+          const sqrtAlphaPrevious = Math.sqrt(alphaPrevious);
+          const sqrtOneMinusAlphaPrevious = Math.sqrt(1 - alphaPrevious);
+          const next = new Float32Array(VALUES);
+
+          for (let i = 0; i < VALUES; i++) {
+            const clean = clamp((sample[i] - sqrtOneMinusAlphaT * noise[i]) / sqrtAlphaT, -1, 1);
+            next[i] = sqrtAlphaPrevious * clean + sqrtOneMinusAlphaPrevious * noise[i];
+          }
+          sample = next;
+          progressEl.value = Math.round((step + 1) * 100 / timesteps.length);
+          renderImage(sample);
+          await delay();
+        }
+        setStatus('생성 완료');
+      } catch (error) {
+        setStatus(`오류: ${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        generateButton.disabled = false;
+      }
+    }
+
+    generateButton.addEventListener('click', generate);
+  </script>
+</body>
+</html>
