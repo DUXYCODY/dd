@@ -167,7 +167,7 @@
       }
     }
 
-    async generate(args) {
+    async generate(args, util) {
       if (!this.session) throw new Error('먼저 ONNX 모델을 불러오세요.');
       if (this.generating) throw new Error('이미 얼굴을 생성하고 있습니다.');
 
@@ -180,6 +180,11 @@
         const label = gender === 'male' ? 1n : 0n;
         const timesteps = buildSamplingTimesteps(Scratch.Cast.toNumber(args.STEPS));
         let sample = gaussianNoise(VALUES);
+
+        // 생성 시작 시 랜덤 노이즈를 바로 보여준다.
+        this.lastImage = sample;
+        if (this._canDisplay(util)) this._renderImage(sample, util);
+        await delay();
 
         for (let step = 0; step < timesteps.length; step++) {
           const t = timesteps[step];
@@ -208,6 +213,12 @@
           }
           sample = next;
           this.progress = Math.round((step + 1) * 100 / timesteps.length);
+
+          // 5단계마다, 그리고 마지막 단계에서 중간 결과를 갱신한다.
+          if ((step + 1) % 5 === 0 || step === timesteps.length - 1) {
+            this.lastImage = sample;
+            if (this._canDisplay(util)) this._renderImage(sample, util);
+          }
           await delay();
         }
 
@@ -221,17 +232,21 @@
       }
     }
 
-    showOnSprite(args, util) {
-      if (!this.lastImage) throw new Error('먼저 얼굴을 생성하세요.');
+    _canDisplay(util) {
       const renderer = Scratch.vm && Scratch.vm.renderer;
-      if (!renderer || typeof renderer.createBitmapSkin !== 'function') {
-        throw new Error('TurboWarp 렌더러를 사용할 수 없습니다.');
-      }
-      if (!util || !util.target || util.target.drawableID === undefined) {
-        throw new Error('표시할 스프라이트를 찾지 못했습니다.');
-      }
-      if (!globalThis.document || !document.createElement) throw new Error('캔버스를 만들 수 없습니다.');
+      return Boolean(
+        renderer &&
+        typeof renderer.createBitmapSkin === 'function' &&
+        util &&
+        util.target &&
+        util.target.drawableID !== undefined &&
+        globalThis.document &&
+        document.createElement
+      );
+    }
 
+    _renderImage(image, util) {
+      const renderer = Scratch.vm.renderer;
       const source = document.createElement('canvas');
       source.width = SIZE;
       source.height = SIZE;
@@ -239,9 +254,9 @@
       const pixels = sourceContext.createImageData(SIZE, SIZE);
       const plane = SIZE * SIZE;
       for (let i = 0; i < plane; i++) {
-        pixels.data[i * 4] = Math.round(clamp((this.lastImage[i] + 1) * 127.5, 0, 255));
-        pixels.data[i * 4 + 1] = Math.round(clamp((this.lastImage[plane + i] + 1) * 127.5, 0, 255));
-        pixels.data[i * 4 + 2] = Math.round(clamp((this.lastImage[plane * 2 + i] + 1) * 127.5, 0, 255));
+        pixels.data[i * 4] = Math.round(clamp((image[i] + 1) * 127.5, 0, 255));
+        pixels.data[i * 4 + 1] = Math.round(clamp((image[plane + i] + 1) * 127.5, 0, 255));
+        pixels.data[i * 4 + 2] = Math.round(clamp((image[plane * 2 + i] + 1) * 127.5, 0, 255));
         pixels.data[i * 4 + 3] = 255;
       }
       sourceContext.putImageData(pixels, 0, 0);
@@ -259,6 +274,19 @@
         renderer.destroySkin(this.lastSkinId);
       }
       this.lastSkinId = newSkinId;
+    }
+
+    showOnSprite(args, util) {
+      if (!this.lastImage) throw new Error('먼저 얼굴을 생성하세요.');
+      const renderer = Scratch.vm && Scratch.vm.renderer;
+      if (!renderer || typeof renderer.createBitmapSkin !== 'function') {
+        throw new Error('TurboWarp 렌더러를 사용할 수 없습니다.');
+      }
+      if (!util || !util.target || util.target.drawableID === undefined) {
+        throw new Error('표시할 스프라이트를 찾지 못했습니다.');
+      }
+      if (!globalThis.document || !document.createElement) throw new Error('캔버스를 만들 수 없습니다.');
+      this._renderImage(this.lastImage, util);
     }
   }
 
